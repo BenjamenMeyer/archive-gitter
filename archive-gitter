@@ -7,6 +7,8 @@ Fetch gitter archives of all your public rooms
 from datetime import datetime, timezone, timedelta
 import json
 import os
+import os.path
+import sys
 import time
 import uuid
 
@@ -16,10 +18,44 @@ import requests
 import requests_cache
 requests_cache.install_cache('gitter')
 
-with open('token') as f:
-    token = f.read().strip()
+# default config that matches the original behavior
+CONFIG = {
+    "token": "",
+    "all": True,
+    "rooms": []
+}
 
-h = {'Authorization': 'Bearer %s' % token}
+if os.path.exists("token"):
+    print("Found original token file...")
+    if not os.path.exists("config.json"):
+        print("Did not find the JSON config file")
+        with open("token", "rt") as fi:
+            CONFIG["token"] = fi.read().strip()
+            print("Read the token from the token file")
+        with open("config.json", "wt") as fo:
+            print("Writing default config to the new JSON config file")
+            json.dump(CONFIG, fo, indent=4)
+            print("JSON config written")
+
+if not os.path.exists("config.json"):
+    print("Please create your config.json file:", file=sys.stderr)
+    json.dump(CONFIG, sys.stderr, indent=4)
+    print("\n", file=sys.stderr)
+    sys.exit(1)
+
+with open('config.json', "rt") as f:
+    # load the configuration from the file
+    LOADED_CONFIG = json.load(f)
+    # merge it with the default configuration
+    CONFIG.update(LOADED_CONFIG)
+
+if not CONFIG['token']:
+    print("Please enter your token into the config.json file", file=sys.stderr)
+    json.dump(CONFIG, sys.stderr, indent=4)
+    print("\n", file=sys.stderr)
+    sys.exit(2)
+
+h = {'Authorization': 'Bearer %s' % CONFIG['token']}
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -47,50 +83,53 @@ def api_request(path):
 rooms = api_request('/rooms?_=%s' % uuid.uuid4().hex)
 for room in rooms:
     name = room['name']
-    if room['oneToOne'] or room.get('security') == 'PRIVATE':
-        dirname = 'archive-private'
-    else:
-        dirname = 'archive'
-    uri = room.get('uri', room['url'].lstrip('/'))
-    print(name)
-    dest = os.path.join(dirname, uri + '.json')
-    if '/' in dest:
-        d = dest.rsplit('/', 1)[0]
-        if not os.path.exists(d):
-            os.makedirs(d)
-
-    if os.path.exists(dest):
-        print("Checking for new messages: %s" % dest)
-        with open(dest) as f:
-            room_messages = json.load(f)
-    else:
-        print("New room: %s" % dest)
-        room_messages = []
-    if room_messages:
-        key='afterId'
-        last_id = room_messages[-1]['id']
-        # cache-bust first forward-request
-        messages = api_request('/rooms/%s/chatMessages?limit=5000&afterId=%s&_=%s' % (
-            room['id'], room_messages[-1]['id'], uuid.uuid4().hex))
-    else:
-        key='beforeId'
-        try:
-            messages = api_request('/rooms/%s/chatMessages?limit=5000' % room['id'])
-        except Exception as e:
-            print("Failed to get messages for %s: %s" % (name, e))
-            continue
-
-    while messages:
-        if key == 'beforeId':
-             # left-extend before
-            room_messages[:0] = messages
-            edge_message = messages[0]
+    if CONFIG['all']  or name in CONFIG['rooms']:
+        if room['oneToOne'] or room.get('security') == 'PRIVATE':
+            dirname = 'archive-private'
         else:
-            room_messages.extend(messages)
-            edge_message = messages[-1]
-        print(len(room_messages))
-        print(edge_message['sent'], edge_message['text'].split('\n', 1)[0])
-        messages = api_request('/rooms/%s/chatMessages?limit=5000&%s=%s' % (
-            room['id'], key, edge_message['id']))
-    with open(dest, 'w') as f:
-        json.dump(room_messages, f, sort_keys=True, indent=1)
+            dirname = 'archive'
+        uri = room.get('uri', room['url'].lstrip('/'))
+        print(name)
+        dest = os.path.join(dirname, uri + '.json')
+        if '/' in dest:
+            d = dest.rsplit('/', 1)[0]
+            if not os.path.exists(d):
+                os.makedirs(d)
+
+        if os.path.exists(dest):
+            print("Checking for new messages: %s" % dest)
+            with open(dest) as f:
+                room_messages = json.load(f)
+        else:
+            print("New room: %s" % dest)
+            room_messages = []
+        if room_messages:
+            key='afterId'
+            last_id = room_messages[-1]['id']
+            # cache-bust first forward-request
+            messages = api_request('/rooms/%s/chatMessages?limit=5000&afterId=%s&_=%s' % (
+                room['id'], room_messages[-1]['id'], uuid.uuid4().hex))
+        else:
+            key='beforeId'
+            try:
+                messages = api_request('/rooms/%s/chatMessages?limit=5000' % room['id'])
+            except Exception as e:
+                print("Failed to get messages for %s: %s" % (name, e))
+                continue
+
+        while messages:
+            if key == 'beforeId':
+                 # left-extend before
+                room_messages[:0] = messages
+                edge_message = messages[0]
+            else:
+                room_messages.extend(messages)
+                edge_message = messages[-1]
+            print(len(room_messages))
+            print(edge_message['sent'], edge_message['text'].split('\n', 1)[0])
+            messages = api_request('/rooms/%s/chatMessages?limit=5000&%s=%s' % (
+                room['id'], key, edge_message['id']))
+        with open(dest, 'w') as f:
+            json.dump(room_messages, f, sort_keys=True, indent=1)
+    elif not len(CONFIG['rooms']):
+        print("Found room: %s" % name)
